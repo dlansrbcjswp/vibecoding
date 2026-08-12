@@ -1,0 +1,7 @@
+streamlit>=1.37
+pandas>=2.2
+requests>=2.32
+beautifulsoup4>=4.12
+deep-translator>=1.11
+truststore>=0.10.4
+playwright>=1.54
