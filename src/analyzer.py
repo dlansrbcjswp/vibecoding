@@ -878,17 +878,6 @@ def build_unclassified_terms(
     return pd.DataFrame(kept[:limit], columns=columns)
 
 
-# 건수가 적어도 사업 판단에 영향이 큰 주제입니다. 소수 언급도 별도로 짚습니다.
-WATCH_CATEGORIES: tuple[str, ...] = (
-    "작업장",
-    "접속·성능",
-    "운영·CS",
-    "과금·결제",
-    "거래·경제",
-    "신규 서버",
-)
-
-
 def _clip(value: object, length: int = 68) -> str:
     text = " ".join(str(value or "").split())
     if len(text) <= length:
@@ -1023,27 +1012,7 @@ def build_trend_narrative(
                 )
             blocks.append(sentence)
 
-    # 3) 건수는 적지만 짚어야 할 주제
-    watch_lines: list[str] = []
-    for name in WATCH_CATEGORIES:
-        count = int(counts.get(name, 0))
-        if count <= 0:
-            continue
-        part = trend_frame[trend_frame["category"] == name]
-        samples = _representative_posts(part, 1)
-        line = f"- **{name} {count:,}건**"
-        if samples:
-            line += f" — “{samples[0]}”"
-        watch_lines.append(line)
-    if watch_lines:
-        blocks.append(
-            "**건수는 적지만 확인이 필요한 주제**\n\n"
-            "아래 항목은 언급량이 크지 않아도 서비스 운영과 직결되는 주제라 "
-            "원문 확인을 권합니다."
-        )
-        blocks.extend(watch_lines)
-
-    # 4) 해석 주의
+    # 3) 해석 주의
     cautions: list[str] = []
     if other_count:
         ratio = other_count / total * 100

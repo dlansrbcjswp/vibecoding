@@ -257,11 +257,8 @@ def _show_category_metrics(category_stats: pd.DataFrame) -> None:
         observed.to_dict("records"),
         key=lambda item: _category_sort_key(item["분류"], item["전체"]),
     )
-    for start in range(0, len(rows), 4):
-        columns = st.columns(4)
-        for offset, item in enumerate(rows[start : start + 4]):
-            with columns[offset]:
-                st.metric(item["분류"], f"{int(item['전체']):,}건")
+    ordered = pd.DataFrame(rows)
+    st.bar_chart(ordered.set_index("분류")["전체"])
 
 
 def _format_count_option(label: str, counts: dict[str, int]) -> str:
@@ -684,7 +681,7 @@ st.caption(
     "별도 참고 영역으로 분리합니다."
 )
 
-with st.expander("인기 게시글", expanded=False):
+with st.expander("인기 게시글", expanded=True):
     st.caption(
         "조회 기간 내 자연 발생 유저 글 중 댓글이 많은 순 / 조회수가 많은 순 "
         "상위 10건을 각각 보여줍니다. 해당 지표가 확인되지 않은 글은 순위에서 제외됩니다."
@@ -737,61 +734,58 @@ display_df = _filter_display_rows(
 )
 st.caption(f"현재 필터 결과: {len(display_df):,}건")
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["동향 요약", "원문·번역", "콘텐츠·공략 참고", "수집 내역"]
-)
+video_df = support_df[support_df["content_type"] == "공략·영상"]
 
-with tab1:
-    left, right = st.columns([1, 1.05], gap="large")
-    with left:
-        st.markdown("#### 카테고리 분류")
+left, right = st.columns([1, 1], gap="large")
+with left:
+    st.markdown("#### 주요 키워드")
+    st.caption(
+        "‘관련 글 수’는 같은 글에서 같은 단어가 여러 번 나와도 1건으로 계산합니다."
+    )
+    if keyword_stats.empty:
+        st.info("등록된 업무 키워드와 일치하는 글이 없습니다.")
+    else:
         st.dataframe(
-            category_stats[["분류", "전체", "자연 발생"]],
+            keyword_stats.head(30),
             use_container_width=True,
             hide_index=True,
         )
-        observed_chart = category_stats[category_stats["전체"] > 0]
-        if not observed_chart.empty:
-            st.bar_chart(observed_chart.set_index("분류")["전체"])
 
-    with right:
-        st.markdown("#### 주요 키워드")
-        st.caption(
-            "‘관련 글 수’는 같은 글에서 같은 단어가 여러 번 나와도 1건으로 계산합니다."
-        )
-        if keyword_stats.empty:
-            st.info("등록된 업무 키워드와 일치하는 글이 없습니다.")
-        else:
-            st.dataframe(
-                keyword_stats.head(30),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    st.markdown("#### 카테고리별 관련 원문")
-    st.caption(
-        "각 카테고리의 실제 게시글을 바로 확인할 수 있습니다. 자동 분류가 애매한 글은 "
-        "원문·번역 탭에서 다시 확인하세요."
+with right:
+    st.markdown("#### 주요 영상")
+    st.caption("Bilibili 등에서 수집된 공략·영상 자료를 조회수 순으로 보여줍니다.")
+    _render_top_post_list(
+        video_df,
+        "views",
+        "조회수",
+        "공략·영상 자료가 없습니다.",
+        count=10,
     )
-    _show_category_examples(trend_df)
 
-    unclassified = build_unclassified_terms(trend_df)
-    with st.expander("미분류(기타) 글에서 자주 나온 표현", expanded=False):
-        st.caption(
-            "‘기타’로 남은 글에 2건 이상 반복 등장했지만 아직 분류 규칙에 없는 "
-            "중국어 표현입니다. 실제로 의미 있는 주제라면 규칙에 추가해 "
-            "미분류 비율을 낮출 수 있습니다."
+st.markdown("#### 카테고리별 관련 원문")
+st.caption(
+    "각 카테고리의 실제 게시글을 바로 확인할 수 있습니다. 자동 분류가 애매한 글은 "
+    "아래 ‘원문·번역’에서 다시 확인하세요."
+)
+_show_category_examples(trend_df)
+
+unclassified = build_unclassified_terms(trend_df)
+with st.expander("미분류(기타) 글에서 자주 나온 표현", expanded=False):
+    st.caption(
+        "‘기타’로 남은 글에 2건 이상 반복 등장했지만 아직 분류 규칙에 없는 "
+        "중국어 표현입니다. 실제로 의미 있는 주제라면 규칙에 추가해 "
+        "미분류 비율을 낮출 수 있습니다."
+    )
+    if unclassified.empty:
+        st.info("2건 이상 반복된 미등록 표현이 없습니다.")
+    else:
+        st.dataframe(
+            unclassified,
+            use_container_width=True,
+            hide_index=True,
         )
-        if unclassified.empty:
-            st.info("2건 이상 반복된 미등록 표현이 없습니다.")
-        else:
-            st.dataframe(
-                unclassified,
-                use_container_width=True,
-                hide_index=True,
-            )
 
-with tab2:
+with st.expander("원문·번역 (개별 게시글 상세)", expanded=False):
     st.caption(
         "검증된 개별 게시글 주소와 실제 수집 범위를 함께 표시합니다. "
         "영상은 게시글 본문이 아니라 영상 제목·설명 기준입니다."
@@ -844,129 +838,6 @@ with tab2:
                 if row["url"]:
                     st.link_button("원문 열기", row["url"])
                     st.caption(f"원문 주소: {row['url']}")
-
-with tab3:
-    st.caption(
-        "Bilibili 영상과 홍보·공식 자료입니다. 어떤 정보성 콘텐츠가 생산되는지는 "
-        "볼 수 있지만, 댓글 본문을 수집하지 않았으므로 유저 반응·여론으로 집계하지 않습니다."
-    )
-    if support_df.empty:
-        st.info("공략·영상·홍보 참고자료가 없습니다.")
-    else:
-        support_stats = (
-            support_df.groupby(["content_type", "category"], dropna=False)
-            .size()
-            .reset_index(name="건수")
-            .sort_values("건수", ascending=False)
-        )
-        st.dataframe(
-            support_stats,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "content_type": "자료 유형",
-                "category": "내용 분류",
-            },
-        )
-        support_list = support_df[
-            ["date", "source", "category", "content_type", "title_ko", "views", "url"]
-        ].copy()
-        st.dataframe(
-            support_list,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "date": "일자",
-                "source": "출처",
-                "category": "내용 분류",
-                "content_type": "자료 유형",
-                "title_ko": "한국어 제목",
-                "views": st.column_config.NumberColumn("조회", format="%d"),
-                "url": st.column_config.LinkColumn("원문", display_text="열기"),
-            },
-        )
-
-with tab4:
-    _show_source_status(st.session_state.source_status)
-
-    st.markdown("#### 검증·제외 내역")
-    quality_columns = st.columns(4)
-    quality_columns[0].metric("누적 수집 후보", f"{st.session_state.candidate_count:,}건")
-    quality_columns[1].metric("기간 내 검증", f"{len(result_df):,}건")
-    quality_columns[2].metric(
-        "이벤트성 제외",
-        f"{st.session_state.campaign_count:,}건",
-    )
-    quality_columns[3].metric(
-        "저정보 제외",
-        f"{st.session_state.low_signal_count:,}건",
-    )
-    quality_columns = st.columns(4)
-    quality_columns[0].metric(
-        "날짜 미확인 제외",
-        f"{st.session_state.unknown_date_count:,}건",
-    )
-    quality_columns[1].metric(
-        "기간 밖 제외",
-        f"{st.session_state.out_of_range_count:,}건",
-    )
-    quality_columns[2].metric(
-        "저관련 제외",
-        f"{st.session_state.irrelevant_count:,}건",
-    )
-    quality_columns[3].metric(
-        "비정상 제외",
-        f"{st.session_state.invalid_count:,}건",
-    )
-
-    st.markdown("#### 일자별 건수")
-    if result_df.empty or "date" not in result_df.columns:
-        st.caption("표시할 글이 없습니다.")
-    else:
-        daily = (
-            result_df[result_df["date"].astype(str) != ""]
-            .groupby("date", dropna=False)
-            .agg(
-                전체=("date", "size"),
-                자연발생=(
-                    "content_type",
-                    lambda values: int((values == "자연 발생").sum()),
-                ),
-            )
-            .reset_index()
-            .rename(columns={"date": "게시일"})
-            .sort_values("게시일", ascending=False)
-        )
-        st.dataframe(daily, use_container_width=True, hide_index=True)
-        st.caption(
-            "특정 날짜만 유독 적다면 그날 글이 적었던 것이 아니라 "
-            "그 시점 목록을 확보하지 못했을 가능성이 큽니다. "
-            "매주 실행할수록 누적 캐시가 쌓여 과거 일자도 채워집니다."
-        )
-
-    st.markdown("#### 출처별 구성")
-    source_df = (
-        result_df.groupby("source", dropna=False)
-        .agg(
-            수집글수=("source", "size"),
-            자연발생=("content_type", lambda values: int((values == "자연 발생").sum())),
-            이벤트홍보=(
-                "content_type",
-                lambda values: int((values == "이벤트·홍보").sum()),
-            ),
-            공략영상=("content_type", lambda values: int((values == "공략·영상").sum())),
-            날짜미확인=("date", lambda values: int((values == "").sum())),
-        )
-        .reset_index()
-        .rename(columns={"source": "출처"})
-        .sort_values("수집글수", ascending=False)
-    )
-    st.dataframe(source_df, use_container_width=True, hide_index=True)
-    st.caption(
-        f"분석 기간: {st.session_state.last_period} · "
-        "QQ는 일반 게시글 광장·공식 정보의 공개 날짜순 목록 기준 · "
-        "비공개·삭제 글과 이미지·댓글은 수집 대상 아님"
-    )
 
 st.divider()
 st.subheader("결과 글 목록")
@@ -1036,4 +907,87 @@ st.download_button(
     data=csv_data,
     file_name="l2m_cn_trend_results.csv",
     mime="text/csv",
+)
+
+st.divider()
+st.subheader("수집 내역")
+_show_source_status(st.session_state.source_status)
+
+st.markdown("#### 검증·제외 내역")
+quality_columns = st.columns(4)
+quality_columns[0].metric("누적 수집 후보", f"{st.session_state.candidate_count:,}건")
+quality_columns[1].metric("기간 내 검증", f"{len(result_df):,}건")
+quality_columns[2].metric(
+    "이벤트성 제외",
+    f"{st.session_state.campaign_count:,}건",
+)
+quality_columns[3].metric(
+    "저정보 제외",
+    f"{st.session_state.low_signal_count:,}건",
+)
+quality_columns = st.columns(4)
+quality_columns[0].metric(
+    "날짜 미확인 제외",
+    f"{st.session_state.unknown_date_count:,}건",
+)
+quality_columns[1].metric(
+    "기간 밖 제외",
+    f"{st.session_state.out_of_range_count:,}건",
+)
+quality_columns[2].metric(
+    "저관련 제외",
+    f"{st.session_state.irrelevant_count:,}건",
+)
+quality_columns[3].metric(
+    "비정상 제외",
+    f"{st.session_state.invalid_count:,}건",
+)
+
+st.markdown("#### 일자별 건수")
+if result_df.empty or "date" not in result_df.columns:
+    st.caption("표시할 글이 없습니다.")
+else:
+    daily = (
+        result_df[result_df["date"].astype(str) != ""]
+        .groupby("date", dropna=False)
+        .agg(
+            전체=("date", "size"),
+            자연발생=(
+                "content_type",
+                lambda values: int((values == "자연 발생").sum()),
+            ),
+        )
+        .reset_index()
+        .rename(columns={"date": "게시일"})
+        .sort_values("게시일", ascending=False)
+    )
+    st.dataframe(daily, use_container_width=True, hide_index=True)
+    st.caption(
+        "특정 날짜만 유독 적다면 그날 글이 적었던 것이 아니라 "
+        "그 시점 목록을 확보하지 못했을 가능성이 큽니다. "
+        "매주 실행할수록 누적 캐시가 쌓여 과거 일자도 채워집니다."
+    )
+
+st.markdown("#### 출처별 구성")
+source_df = (
+    result_df.groupby("source", dropna=False)
+    .agg(
+        수집글수=("source", "size"),
+        자연발생=("content_type", lambda values: int((values == "자연 발생").sum())),
+        이벤트홍보=(
+            "content_type",
+            lambda values: int((values == "이벤트·홍보").sum()),
+        ),
+        공략영상=("content_type", lambda values: int((values == "공략·영상").sum())),
+        날짜미확인=("date", lambda values: int((values == "").sum())),
+    )
+    .reset_index()
+    .rename(columns={"source": "출처"})
+    .sort_values("수집글수", ascending=False)
+)
+st.dataframe(source_df, use_container_width=True, hide_index=True)
+st.caption(
+    f"분석 기간: {st.session_state.last_period} · "
+    "QQ는 일반 게시글 광장·공식 정보의 공개 날짜순 목록 기준 · "
+    "비공개·삭제 글과 이미지·댓글은 수집 대상 아님"
 )
