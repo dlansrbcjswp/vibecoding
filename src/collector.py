@@ -826,6 +826,10 @@ def _qq_post_from_feed_item(
     is_official = section == QQ_OFFICIAL_SECTION or _is_qq_official_poster(
         poster, author
     )
+    visitor_info = item.get("visitorInfo") or {}
+    view_count = (
+        visitor_info.get("viewCount") if isinstance(visitor_info, dict) else None
+    )
 
     return CollectedPost(
         source="QQ 공식 채널",
@@ -834,6 +838,7 @@ def _qq_post_from_feed_item(
         url=_canonical_url(url),
         published_at=published_at,
         author=author,
+        views=_parse_count(view_count),
         comments=_parse_count(item.get("commentCount")),
         content_scope="게시글 피드 텍스트 전체(이미지·댓글 제외)",
         source_note="QQ 날짜순 공개 게시판 · 원본 createTime 기준",

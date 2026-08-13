@@ -442,18 +442,30 @@ def _render_top_post_list(
 
 
 def _show_popular_posts(frame: pd.DataFrame) -> None:
-    """댓글·반응이 많은 순으로 상위 게시글을 보여줍니다."""
+    """댓글 TOP 10과 조회수 TOP 10을 좌우로 나란히 보여줍니다."""
     if frame.empty:
         st.info("자연 발생 유저 글이 없습니다.")
         return
 
-    _render_top_post_list(
-        frame,
-        "engagement",
-        "댓글/반응",
-        "댓글·반응이 확인된 글이 없습니다.",
-        count=10,
-    )
+    comment_col, view_col = st.columns(2, gap="large")
+    with comment_col:
+        st.markdown("##### 댓글 TOP 10")
+        _render_top_post_list(
+            frame,
+            "engagement",
+            "댓글/반응",
+            "댓글·반응이 확인된 글이 없습니다.",
+            count=10,
+        )
+    with view_col:
+        st.markdown("##### 조회수 TOP 10")
+        _render_top_post_list(
+            frame,
+            "views",
+            "조회수",
+            "조회수가 확인된 글이 없습니다.",
+            count=10,
+        )
 
 
 def _show_category_examples(frame: pd.DataFrame) -> None:
@@ -674,8 +686,8 @@ st.caption(
 
 with st.expander("인기 게시글", expanded=False):
     st.caption(
-        "조회 기간 내 자연 발생 유저 글 중 댓글·반응이 많은 순 상위 10건입니다. "
-        "댓글 수가 확인되지 않은 글은 순위에서 제외됩니다."
+        "조회 기간 내 자연 발생 유저 글 중 댓글이 많은 순 / 조회수가 많은 순 "
+        "상위 10건을 각각 보여줍니다. 해당 지표가 확인되지 않은 글은 순위에서 제외됩니다."
     )
     _show_popular_posts(trend_df)
 
