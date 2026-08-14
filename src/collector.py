@@ -104,11 +104,18 @@ QQ_FALLBACK_BOARD_ROUTES = (
 # 수집 깊이와 표시 범위를 분리하지 않으면, 하루만 조회할 때 스캔이
 # 즉시 종료돼 사실상 캐시에 있는 것만 보이게 됩니다.
 COLLECT_MIN_LOOKBACK_DAYS = 14
+# 화면(app.py)에서도 조회 시작일·종료일을 이 일수보다 과거로는 고르지 못하게
+# 막아 둡니다. 여기서도 동일한 값으로 한 번 더 막아, UI 제한을 우회해 호출되는
+# 경우에도 QQ 스캔이 한없이 과거로 내려가지 않도록 합니다.
+QQ_MAX_SCAN_LOOKBACK_DAYS = 30
 
 # 한 화면씩 내려가므로 라운드 수를 늘리되, 전체 실행 시간이 과도해지지
-# 않도록 게시판당 시간 상한을 함께 둡니다.
-QQ_PERIOD_SCAN_MAX_SCROLLS = 120
-QQ_BOARD_TIME_BUDGET_SECONDS = 150.0
+# 않도록 게시판당 시간 상한을 함께 둡니다. 조회 기간을 최대 한 달 전까지
+# 허용하므로(QQ_MAX_SCAN_LOOKBACK_DAYS), 그 깊이까지 스크롤할 여유를 둡니다.
+# 실제로는 대부분 기간 경계(period_boundary_reached)에 먼저 도달해 이 상한을
+# 다 쓰지 않고 끝납니다.
+QQ_PERIOD_SCAN_MAX_SCROLLS = 200
+QQ_BOARD_TIME_BUDGET_SECONDS = 300.0
 QQ_PERIOD_SCAN_STALE_ROUNDS = 6
 
 # 내부 스크롤 컨테이너를 찾아 바닥까지 내리고, 마지막 카드도 화면에 붙입니다.
@@ -2668,9 +2675,15 @@ def collect_posts(
     # 표시 범위(period_start)와 수집 범위(scan_start)를 분리합니다.
     # 화면에는 사용자가 지정한 기간만 나오지만, 실제 수집은 더 깊이 내려가
     # 캐시를 채웁니다. 하루짜리 조회에서 결과가 비는 문제를 막습니다.
-    scan_start = min(
-        period_start,
-        period_end - timedelta(days=COLLECT_MIN_LOOKBACK_DAYS),
+    # 다만 QQ 스캔은 '오늘'에서 과거로 직접 스크롤하는 방식이라 너무 깊이
+    # 내려가면 실행 시간이 과도해지므로, 아래로는 최대 QQ_MAX_SCAN_LOOKBACK_DAYS
+    # 만큼만 내려가도록 한 번 더 막습니다.
+    scan_start = max(
+        min(
+            period_start,
+            period_end - timedelta(days=COLLECT_MIN_LOOKBACK_DAYS),
+        ),
+        period_end - timedelta(days=QQ_MAX_SCAN_LOOKBACK_DAYS),
     )
     sources = [source for source in selected_sources if source in COLLECTORS]
     if not sources:
