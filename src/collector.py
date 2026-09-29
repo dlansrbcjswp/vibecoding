@@ -182,6 +182,13 @@ TAPTAP_ITEM_SELECTOR = ".moment-list-item, .moment-feed-list-item"
 TAPTAP_REVIEW_URL = "https://www.taptap.cn/app/749379/review"
 TAPTAP_REVIEW_ITEM_SELECTOR = ".review-item"
 TAPTAP_REVIEW_MAX_ROUNDS = 40
+
+# 微博·知乎·抖音·小红书는 비로그인 수집이 막혀 있지만(실측), 위챗 공식계정 글은
+# 소구(搜狗) 검색을 거치면 로그인 없이 본문까지 읽힙니다.
+WECHAT_SOURCE_LABEL = "위챗 공식계정"
+WECHAT_SEARCH_URL = "https://weixin.sogou.com/weixin"
+WECHAT_MAX_PAGES = 3
+WECHAT_REQUEST_DELAY = 1.5
 TAPTAP_MAX_SCROLL_ROUNDS = 60
 TAPTAP_STALE_ROUNDS = 5
 TAPTAP_BOUNDARY_CONFIRM_ROUNDS = 2
@@ -256,6 +263,8 @@ def _canonical_url(url: str) -> str:
     keep_query = (
         "taptap.cn/moment/" in url
         or ("pd.qq.com/g/" in url and "/post/" in url)
+        # 위챗 글은 경로가 전부 /s 라서 쿼리를 지우면 글끼리 구분되지 않습니다.
+        or "mp.weixin.qq.com/s" in url
     )
     query = parts.query if keep_query else ""
     return urlunsplit((parts.scheme or "https", parts.netloc, parts.path, query, ""))
@@ -1462,6 +1471,172 @@ def _collect_taptap_links_browser(
         "browser_label": browser_label,
     }
     return links, meta
+
+
+def _wechat_resolve_url(link_url: str, referer: str) -> str:
+    """검색 결과의 중간 링크를 실제 위챗 글 주소로 바꿉니다.
+
+    소구 검색의 /link 응답은 HTML이 아니라 주소를 조각조각 이어붙이는
+    자바스크립트라, 그 조각을 모아 합쳐야 실제 주소가 나옵니다.
+    """
+    response = _get_response(link_url, headers={"Referer": referer})
+    fragments = re.findall(r"url \+= '([^']*)'", response.text)
+    resolved = "".join(fragments).replace("@", "").strip()
+    if not resolved.startswith("http"):
+        return ""
+    return resolved
+
+
+def _wechat_permalink(html: str, fetched_url: str) -> str:
+    """가능하면 영구 주소(msg_link)를 쓰고, 없으면 받은 주소를 그대로 둡니다.
+
+    검색이 준 주소에는 서명과 시각이 붙어 있어 시간이 지나면 만료됩니다.
+    계정에 따라 본문에 영구 주소가 들어 있는 경우가 있어 먼저 찾아봅니다.
+    """
+    match = re.search(r'var\s+msg_link\s*=\s*["\']([^"\']+)["\']', html)
+    if match:
+        link = _clean_text(match.group(1)).replace("&amp;", "&")
+        if link.startswith("http"):
+            return link
+    return fetched_url
+
+
+def _parse_wechat_article(html: str, url: str, fallback: dict) -> CollectedPost | None:
+    soup = BeautifulSoup(html, "html.parser")
+    title = _clean_text(
+        (soup.select_one("#activity-name") or soup.title).get_text(" ", strip=True)
+        if (soup.select_one("#activity-name") or soup.title)
+        else fallback.get("title", "")
+    )
+    content_node = soup.select_one("#js_content")
+    body = _clean_text(content_node.get_text(" ", strip=True)) if content_node else ""
+    if not body:
+        # 본문 구조가 계정마다 달라 실패할 수 있습니다. 제목·요약이라도 남깁니다.
+        body = _clean_text(fallback.get("summary", ""))
+    if not title and not body:
+        return None
+
+    published_at = ""
+    stamp = re.search(r'var ct\s*=\s*["\'](\d+)["\']', html)
+    if stamp:
+        published_at = _parse_qq_epoch_date(stamp.group(1))
+    if not published_at:
+        published_at = _clean_text(fallback.get("published_at", ""))
+
+    return CollectedPost(
+        source=WECHAT_SOURCE_LABEL,
+        title=title or _excerpt_title(body),
+        original_text=body,
+        url=_canonical_url(_wechat_permalink(html, url)),
+        published_at=published_at,
+        author=_clean_text(fallback.get("account", "")),
+        content_scope="위챗 공식계정 글 본문(이미지 제외)",
+        source_note="소구 위챗 검색으로 찾은 공개 글 · 원문 링크는 시간이 지나면 만료될 수 있음",
+        source_section="위챗",
+        published_at_source=(
+            "위챗 글 작성 시각" if stamp else "검색 결과 표시 시각"
+        ),
+    )
+
+
+def _collect_wechat(
+    limit: int,
+    start_date: date,
+    end_date: date,
+) -> list[CollectedPost]:
+    """소구(搜狗) 위챗 검색으로 공식계정 글을 수집합니다.
+
+    微博·知乎·抖音·小红书는 비로그인 수집이 막혀 있지만, 위챗 글은 이 경로로
+    로그인 없이 본문까지 읽힙니다. 작업장·환금·사기처럼 사업 판단에 중요한
+    내용이 실제로 오갑니다.
+    """
+    _ = limit
+    posts: list[CollectedPost] = []
+    seen_urls: set[str] = set()
+
+    for page_num in range(1, WECHAT_MAX_PAGES + 1):
+        try:
+            response = _get_response(
+                WECHAT_SEARCH_URL,
+                params={"type": 2, "query": GAME_KEYWORD, "page": page_num},
+            )
+        except requests.RequestException as error:
+            if page_num == 1:
+                raise SourceUnavailable(
+                    f"위챗 검색에 접근하지 못했습니다({type(error).__name__})."
+                ) from error
+            break
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        items = soup.select("li[id^='sogou_vr_11002601_box']") or soup.select(
+            ".news-box li"
+        )
+        if not items:
+            break
+
+        for item in items:
+            anchor = item.select_one("h3 a") or item.select_one("a")
+            if anchor is None:
+                continue
+            href = _clean_text(anchor.get("href"))
+            if not href:
+                continue
+            link_url = _absolute_url(WECHAT_SEARCH_URL, href)
+
+            title = _clean_text(anchor.get_text(" ", strip=True))
+            summary_node = item.select_one(".txt-info")
+            summary = (
+                _clean_text(summary_node.get_text(" ", strip=True))
+                if summary_node
+                else ""
+            )
+            account_node = item.select_one(".account") or item.select_one(
+                ".all-time-y2"
+            )
+            account = (
+                _clean_text(account_node.get_text(" ", strip=True))
+                if account_node
+                else ""
+            )
+            stamp = re.search(r"timeConvert\('(\d+)'\)", str(item))
+            listed_date = _parse_qq_epoch_date(stamp.group(1)) if stamp else ""
+
+            # 검색 결과의 표시 시각으로 먼저 걸러 불필요한 본문 요청을 줄입니다.
+            if listed_date and not _in_period(listed_date, start_date, end_date):
+                continue
+            if not _is_game_relevant(f"{title} {summary}"):
+                continue
+
+            try:
+                article_url = _wechat_resolve_url(link_url, response.url)
+            except requests.RequestException:
+                continue
+            if not article_url or article_url in seen_urls:
+                continue
+            seen_urls.add(article_url)
+
+            try:
+                article = _get_response(article_url)
+            except requests.RequestException:
+                continue
+
+            post = _parse_wechat_article(
+                article.text,
+                article_url,
+                {
+                    "title": title,
+                    "summary": summary,
+                    "account": account,
+                    "published_at": listed_date,
+                },
+            )
+            if post is not None:
+                posts.append(post)
+            time.sleep(WECHAT_REQUEST_DELAY)
+
+        time.sleep(WECHAT_REQUEST_DELAY)
+
+    return posts
 
 
 def _collect_taptap_reviews_browser(
@@ -3001,6 +3176,7 @@ COLLECTORS: dict[str, Collector] = {
     "QQ 공식 채널": _collect_qq,
     "TapTap": _collect_taptap,
     "Bilibili": _collect_bilibili,
+    WECHAT_SOURCE_LABEL: _collect_wechat,
 }
 
 

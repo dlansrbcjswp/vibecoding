@@ -24,6 +24,7 @@ SOURCE_LABELS = [
     "QQ 공식 채널",
     "TapTap",
     "Bilibili",
+    "위챗 공식계정",
 ]
 
 
