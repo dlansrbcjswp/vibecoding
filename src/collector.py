@@ -178,6 +178,10 @@ QQ_LOW_SIGNAL_EXACT = {
 }
 # 목록 카드 클래스명이 바뀐 이력이 있어 옛 이름도 함께 받습니다.
 TAPTAP_ITEM_SELECTOR = ".moment-list-item, .moment-feed-list-item"
+# 게시판과 별개로 리뷰(评价) 탭이 있고, 유저가 직접 쓴 평가라 여론 가치가 큽니다.
+TAPTAP_REVIEW_URL = "https://www.taptap.cn/app/749379/review"
+TAPTAP_REVIEW_ITEM_SELECTOR = ".review-item"
+TAPTAP_REVIEW_MAX_ROUNDS = 40
 TAPTAP_MAX_SCROLL_ROUNDS = 60
 TAPTAP_STALE_ROUNDS = 5
 TAPTAP_BOUNDARY_CONFIRM_ROUNDS = 2
@@ -1460,6 +1464,146 @@ def _collect_taptap_links_browser(
     return links, meta
 
 
+def _collect_taptap_reviews_browser(
+    start_date: date,
+    end_date: date,
+) -> tuple[list[CollectedPost], dict]:
+    """TapTap 리뷰(评价) 탭을 수집합니다.
+
+    게시판(topic)과 달리 리뷰는 목록에 본문이 통째로 들어 있어 상세 요청이
+    필요 없습니다. 리뷰는 유저가 직접 남긴 평가라 여론 파악에 가치가 큽니다.
+    """
+    sync_playwright = _load_playwright()
+    posts_by_url: dict[str, CollectedPost] = {}
+    rounds = 0
+    stale_rounds = 0
+    stop_reason = "max_rounds"
+    boundary_date = (start_date - timedelta(days=1)).isoformat()
+    oldest_seen = ""
+
+    with sync_playwright() as playwright:
+        browser, browser_label = _launch_installed_chromium(playwright)
+        context = browser.new_context(
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            viewport={"width": 1440, "height": 2400},
+        )
+        page = context.new_page()
+        page.set_default_timeout(18_000)
+        try:
+            page.goto(
+                TAPTAP_REVIEW_URL,
+                wait_until="domcontentloaded",
+                timeout=35_000,
+            )
+            try:
+                page.locator(TAPTAP_REVIEW_ITEM_SELECTOR).first.wait_for(
+                    state="attached",
+                    timeout=18_000,
+                )
+            except Exception as error:
+                raise SourceUnavailable(
+                    "TapTap 리뷰 목록을 찾지 못했습니다(페이지 구조 변경 가능성)."
+                ) from error
+            page.wait_for_timeout(800)
+
+            for round_index in range(TAPTAP_REVIEW_MAX_ROUNDS):
+                rounds = round_index + 1
+                before = len(posts_by_url)
+                try:
+                    items = page.locator(TAPTAP_REVIEW_ITEM_SELECTOR).evaluate_all(
+                        """
+                        nodes => nodes.map(node => {
+                            const link = node.querySelector('a[href*="/review/"]');
+                            const author = node.querySelector(
+                                '.review-item__author-name'
+                            );
+                            // 날짜는 operations-time 입니다.
+                            // time-label 은 '9.7 시간 플레이' 같은 플레이시간이라
+                            // 날짜로 읽으면 9월 7일로 잘못 해석됩니다.
+                            const time = node.querySelector(
+                                '.review-item__operations-time'
+                            ) || node.querySelector('.review-item__updated-time');
+                            const body = node.querySelector('.review-item__contents');
+                            const device = node.querySelector('.review-item__device');
+                            return {
+                                url: link ? link.href : '',
+                                author: (author?.innerText || '').trim(),
+                                date_text: (time?.innerText || '').trim(),
+                                text: (body?.innerText || '').trim(),
+                                device: (device?.innerText || '').trim(),
+                            };
+                        })
+                        """
+                    )
+                except Exception:
+                    items = []
+
+                for item in items:
+                    url = _canonical_url(_clean_text(item.get("url")))
+                    text = _clean_text(item.get("text"))
+                    if not url or not text:
+                        continue
+                    published_at = _parse_cn_date(item.get("date_text"))
+                    if published_at:
+                        oldest_seen = (
+                            published_at
+                            if not oldest_seen
+                            else min(oldest_seen, published_at)
+                        )
+                    post = CollectedPost(
+                        source="TapTap",
+                        title=_excerpt_title(text),
+                        original_text=text,
+                        url=url,
+                        published_at=published_at,
+                        author=_clean_text(item.get("author")),
+                        content_scope="리뷰 본문 전체(평점·기기 정보 제외)",
+                        source_note="TapTap 공개 리뷰(评价) 탭",
+                        source_section="리뷰",
+                        published_at_source=(
+                            "TapTap 리뷰 표시 날짜" if published_at else "미확인"
+                        ),
+                    )
+                    existing = posts_by_url.get(url)
+                    posts_by_url[url] = (
+                        _merge_post(existing, post) if existing else post
+                    )
+
+                if len(posts_by_url) == before:
+                    stale_rounds += 1
+                    if stale_rounds >= TAPTAP_STALE_ROUNDS:
+                        stop_reason = "stable_list"
+                        break
+                else:
+                    stale_rounds = 0
+
+                if oldest_seen and oldest_seen < boundary_date:
+                    stop_reason = "period_boundary_reached"
+                    break
+
+                try:
+                    page.evaluate(QQ_SCROLL_SCRIPT)
+                    page.mouse.move(700, 500)
+                    page.mouse.wheel(0, 2400)
+                except Exception:
+                    pass
+                page.wait_for_timeout(1_100)
+        finally:
+            context.close()
+            browser.close()
+
+    posts = list(posts_by_url.values())
+    meta = {
+        "review_rounds": rounds,
+        "review_posts": len(posts),
+        "review_oldest_date": oldest_seen,
+        "review_stop_reason": stop_reason,
+        "browser_label": browser_label,
+    }
+    return posts, meta
+
+
 def _collect_taptap_batch(
     limit: int,
     start_date: date,
@@ -1505,7 +1649,22 @@ def _collect_taptap_batch(
             continue
         time.sleep(REQUEST_DELAY)
 
+    # 게시판 글에 더해 리뷰 탭도 함께 확보합니다. 한쪽이 실패해도 다른 쪽은 남깁니다.
+    try:
+        review_posts, review_meta = _collect_taptap_reviews_browser(
+            start_date,
+            end_date,
+        )
+    except Exception as error:
+        review_posts, review_meta = [], {
+            "review_stop_reason": f"failed:{type(error).__name__}",
+        }
+    posts.extend(review_posts)
+
     meta["period_links_seen"] = len(period_links)
+    meta["review_posts"] = len(review_posts)
+    meta["review_stop_reason"] = _clean_text(review_meta.get("review_stop_reason"))
+    meta["review_oldest_date"] = _clean_text(review_meta.get("review_oldest_date"))
     return posts, meta
 
 
