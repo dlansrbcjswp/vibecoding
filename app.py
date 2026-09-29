@@ -513,11 +513,12 @@ with st.form("collection_form"):
     sources = st.multiselect(
         "조사 소스",
         SOURCE_LABELS,
-        default=["QQ 공식 채널", "TapTap", "Bilibili"],
+        default=SOURCE_LABELS,
         help=(
-            "TapTap·Bilibili는 공개 페이지/API를 사용합니다. "
-            "QQ는 설치된 Chrome/Edge로 일반 게시글 광장의 날짜순 목록을 "
-            "조회 시작일 이전까지 확인하고, 각 글의 실제 게시일을 검증합니다."
+            "TapTap은 게시판과 리뷰(评价)를 함께, Bilibili는 공개 검색 API를 씁니다. "
+            "QQ는 설치된 Chrome/Edge로 채널 피드를 페이지 단위로 확인하고 각 글의 "
+            "실제 게시일을 검증합니다. 위챗 공식계정은 소구(搜狗) 검색을 거쳐 "
+            "공개 글 본문을 확인합니다."
         ),
     )
 
