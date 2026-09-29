@@ -68,6 +68,7 @@ BILIBILI_SEARCH_ENDPOINTS = (
 BILIBILI_VIEW_ENDPOINT = "https://api.bilibili.com/x/web-interface/view"
 TIEBA_URL = "https://tieba.baidu.com/f?kw=" + quote(GAME_KEYWORD)
 QQ_CHANNEL_URL = "https://pd.qq.com/g/pd38175600"
+QQ_CHANNEL_ID = "pd38175600"
 
 REQUEST_TIMEOUT = 18
 REQUEST_DELAY = 0.12
@@ -175,6 +176,8 @@ QQ_LOW_SIGNAL_EXACT = {
     "来了",
     "路过",
 }
+# 목록 카드 클래스명이 바뀐 이력이 있어 옛 이름도 함께 받습니다.
+TAPTAP_ITEM_SELECTOR = ".moment-list-item, .moment-feed-list-item"
 TAPTAP_MAX_SCROLL_ROUNDS = 60
 TAPTAP_STALE_ROUNDS = 5
 TAPTAP_BOUNDARY_CONFIRM_ROUNDS = 2
@@ -1317,10 +1320,19 @@ def _collect_taptap_links_browser(
                 wait_until="domcontentloaded",
                 timeout=35_000,
             )
-            page.locator(".moment-feed-list-item").first.wait_for(
-                state="attached",
-                timeout=18_000,
-            )
+            # TapTap이 목록 카드 클래스명을 moment-feed-list-item -> moment-list-item
+            # 으로 바꾼 적이 있습니다(2026-09 확인). 한쪽만 보면 어느 날 갑자기
+            # 수집이 0건이 되므로 둘 다 받아 둡니다.
+            try:
+                page.locator(TAPTAP_ITEM_SELECTOR).first.wait_for(
+                    state="attached",
+                    timeout=18_000,
+                )
+            except Exception as error:
+                # 목록을 못 읽으면 정적 HTML 폴백으로 넘어가야 합니다.
+                raise SourceUnavailable(
+                    "TapTap 목록 카드를 찾지 못했습니다(페이지 구조 변경 가능성)."
+                ) from error
             page.wait_for_timeout(800)
 
             body_text = _clean_text(page.locator("body").inner_text())
@@ -1330,7 +1342,7 @@ def _collect_taptap_links_browser(
 
             for round_index in range(TAPTAP_MAX_SCROLL_ROUNDS):
                 rounds = round_index + 1
-                items = page.locator(".moment-feed-list-item").evaluate_all(
+                items = page.locator(TAPTAP_ITEM_SELECTOR).evaluate_all(
                     """
                     nodes => nodes.map(node => {
                         const link = node.querySelector('a[href*="/moment/"]');
@@ -1456,7 +1468,9 @@ def _collect_taptap_batch(
     """TapTap 공개 목록 전체를 시도한 뒤 기간 내 상세 글을 검증합니다."""
     try:
         links, meta = _collect_taptap_links_browser(limit, start_date, end_date)
-    except SourceUnavailable:
+    except Exception:
+        # 브라우저 경로가 어떤 이유로든 실패하면(구조 변경·타임아웃·브라우저 미설치)
+        # 수집을 통째로 포기하지 말고 정적 HTML로라도 확보합니다.
         posts = _collect_taptap_static(limit, start_date, end_date)
         return posts, {
             "coverage_state": "partial",
@@ -2428,6 +2442,165 @@ def _collect_qq_rotating_sample_on_page(
     }
 
 
+# 채널 피드 API를 직접 호출하기 위한 설정입니다.
+# 화면 스크롤로 긁던 방식은 가상 스크롤러가 주는 것만 받을 수 있어서
+# 인기도가 낮은 기간이 통째로 빠지는 문제가 있었습니다(2026-07 넷째 주 전체 누락).
+# 같은 데이터를 주는 내부 API를 페이지 번호로 직접 넘기면 그 구멍이 사라집니다.
+QQ_FEED_API = (
+    "https://pd.qq.com/qunng/guild/gotrpc/noauth/"
+    "trpc.qchannel.commreader.ComReader/GetGuildFeeds"
+)
+# 이 두 헤더가 없으면 서버가 retcode=150으로 조용히 빈 응답을 돌려줍니다.
+QQ_FEED_API_HEADERS = {
+    "accept": "application/json",
+    "accept-language": "zh-CN",
+    "content-type": "application/json",
+    "x-oidb": '{"uint32_service_type":12}',
+    "x-qq-client-appid": "537246381",
+}
+QQ_FEED_PAGE_LIMIT = 120
+QQ_FEED_PAGE_TIME_BUDGET_SECONDS = 150.0
+# 이 피드는 시간순이 아니라 깊은 페이지에도 최신 글이 가끔 섞입니다. 그래서
+# "날짜가 오래됐는지"가 아니라 "조회 기간에 해당하는 새 글이 더 나오는지"로
+# 멈출 때를 판단합니다. 이만큼 연속으로 소득이 없으면 그만 봅니다.
+QQ_FEED_BARREN_PAGE_STREAK = 8
+
+QQ_FEED_FETCH_SCRIPT = """
+async ([api, body, headers]) => {
+  try {
+    const response = await fetch(api, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify(body),
+      credentials: 'include',
+    });
+    return {status: response.status, body: await response.text()};
+  } catch (error) {
+    return {status: 0, body: String(error)};
+  }
+}
+"""
+
+
+def _collect_qq_feed_pages(
+    page: object,
+    start_date: date,
+    end_date: date,
+    section_by_channel: dict[str, str] | None = None,
+) -> tuple[list[CollectedPost], dict]:
+    """채널 피드 API를 페이지 번호로 직접 넘기며 글을 모읍니다.
+
+    이 피드는 시간순이 아니라 인기도가 섞인 순서라 정렬 옵션으로는 해결되지
+    않습니다(sortOption 0~3, get_type, from 값을 모두 확인). 대신 페이지를
+    충분히 넘기면 기간 내 글이 빠짐없이 나오는 것을 실측했습니다.
+    """
+    section_map = section_by_channel or {}
+    # 조회 기간이 짧으면 깊이 내려갈 필요가 없습니다. 기간에 비례해 상한을 둡니다.
+    window_days = max(1, (end_date - start_date).days + 1)
+    page_limit = min(QQ_FEED_PAGE_LIMIT, max(40, window_days * 4))
+    posts_by_key: dict[str, CollectedPost] = {}
+    pages_read = 0
+    barren_streak = 0
+    empty_streak = 0
+    stop_reason = "page_limit"
+    oldest_seen = ""
+    period_new = 0
+    started_at = time.monotonic()
+
+    for page_num in range(1, page_limit + 1):
+        if time.monotonic() - started_at > QQ_FEED_PAGE_TIME_BUDGET_SECONDS:
+            stop_reason = "time_budget"
+            break
+
+        attach = (
+            "" if page_num <= 1 else f"notUsed=&pageNum={page_num}&square_v2=1"
+        )
+        body = {
+            "count": 20,
+            "from": 7,
+            "guild_number": QQ_CHANNEL_ID,
+            "get_type": 1,
+            "feedAttchInfo": attach,
+            "sortOption": 0,
+            "need_channel_list": False,
+            "need_top_info": False,
+        }
+        try:
+            result = page.evaluate(
+                QQ_FEED_FETCH_SCRIPT,
+                [QQ_FEED_API, body, QQ_FEED_API_HEADERS],
+            )
+        except Exception:
+            stop_reason = "request_failed"
+            break
+
+        if not isinstance(result, dict) or result.get("status") != 200:
+            stop_reason = "http_error"
+            break
+        try:
+            payload = json.loads(result.get("body") or "")
+        except (TypeError, json.JSONDecodeError):
+            stop_reason = "bad_payload"
+            break
+
+        feeds = ((payload or {}).get("data") or {}).get("vecFeed") or []
+        pages_read = page_num
+        if not feeds:
+            empty_streak += 1
+            if empty_streak >= 2:
+                stop_reason = "no_more_feeds"
+                break
+            continue
+        empty_streak = 0
+
+        page_period_new = 0
+        for item in feeds:
+            channel_info = item.get("channelInfo") if isinstance(item, dict) else None
+            channel_sign = (
+                channel_info.get("sign") if isinstance(channel_info, dict) else None
+            )
+            channel_id = _clean_text(
+                channel_sign.get("channel_id") if isinstance(channel_sign, dict) else ""
+            )
+            section = section_map.get(channel_id, "")
+            post = _qq_post_from_feed_item(item, section, channel_id)
+            if post is None:
+                continue
+            key = _qq_post_key(post.url)
+            if not key:
+                continue
+            existing = posts_by_key.get(key)
+            is_new = existing is None
+            posts_by_key[key] = _merge_post(existing, post) if existing else post
+            if post.published_at:
+                oldest_seen = (
+                    post.published_at
+                    if not oldest_seen
+                    else min(oldest_seen, post.published_at)
+                )
+                if is_new and _in_period(post.published_at, start_date, end_date):
+                    page_period_new += 1
+
+        period_new += page_period_new
+        if page_period_new:
+            barren_streak = 0
+        else:
+            barren_streak += 1
+            if barren_streak >= QQ_FEED_BARREN_PAGE_STREAK:
+                stop_reason = "period_boundary_reached"
+                break
+
+    posts = list(posts_by_key.values())
+    meta = {
+        "feed_pages_read": pages_read,
+        "feed_posts": len(posts),
+        "feed_period_posts": period_new,
+        "feed_oldest_date": oldest_seen,
+        "feed_stop_reason": stop_reason,
+    }
+    return posts, meta
+
+
 def _collect_qq_batch(
     limit: int,
     start_date: date,
@@ -2440,6 +2613,7 @@ def _collect_qq_batch(
     board_results: list[dict] = []
     fallback_used = False
     fallback_meta: dict = {}
+    feed_meta: dict = {}
     routes: list[dict] = []
 
     with sync_playwright() as playwright:
@@ -2477,6 +2651,32 @@ def _collect_qq_batch(
                 for route in routes
                 if not route.get("excluded_section")
             ]
+
+            # 게시판 스크롤보다 먼저, 채널 피드 API를 페이지 단위로 훑습니다.
+            # 스크롤 경로가 놓치던 날짜를 여기서 대부분 메웁니다.
+            section_by_channel = {
+                _clean_text(route.get("channel_id")): _clean_text(route.get("section"))
+                for route in routes
+                if route.get("channel_id")
+            }
+            try:
+                feed_posts, feed_meta = _collect_qq_feed_pages(
+                    page,
+                    start_date,
+                    end_date,
+                    section_by_channel,
+                )
+            except Exception as error:
+                feed_posts, feed_meta = [], {
+                    "feed_stop_reason": f"failed:{type(error).__name__}",
+                }
+            for post in feed_posts:
+                key = _qq_post_key(post.url)
+                existing = posts_by_key.get(key)
+                posts_by_key[key] = (
+                    _merge_post(existing, post) if existing else post
+                )
+
             for route in analysis_routes:
                 board_posts, board_meta = _scan_qq_board(
                     page,
@@ -2545,7 +2745,10 @@ def _collect_qq_batch(
         ),
         {},
     )
-    period_complete = bool(main_board.get("complete"))
+    # 피드 API가 기간 경계까지 훑었다면 스크롤 경로가 미치지 못했더라도
+    # 그 기간은 확보한 것으로 봅니다.
+    feed_complete = feed_meta.get("feed_stop_reason") == "period_boundary_reached"
+    period_complete = bool(main_board.get("complete")) or feed_complete
     total_rounds = sum(int(result.get("rounds", 0) or 0) for result in board_results)
     detail_verified = sum(
         int(result.get("detail_verified_count", 0) or 0)
@@ -2620,6 +2823,10 @@ def _collect_qq_batch(
             main_board.get("oldest_verified_date")
         ),
         "fallback_sample_used": fallback_used,
+        "feed_pages_read": int(feed_meta.get("feed_pages_read", 0) or 0),
+        "feed_posts": int(feed_meta.get("feed_posts", 0) or 0),
+        "feed_oldest_date": _clean_text(feed_meta.get("feed_oldest_date")),
+        "feed_stop_reason": _clean_text(feed_meta.get("feed_stop_reason")),
     }
     return posts, meta
 

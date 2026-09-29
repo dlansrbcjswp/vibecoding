@@ -739,7 +739,9 @@ def analyze_posts(posts: list[dict]) -> pd.DataFrame:
                 "analysis_role": analysis_role,
                 "trend_eligible": trend_eligible,
                 "title": title,
-                "title_ko": title_ko or title,
+                # 번역 실패 시 중국어를 넣으면 '한국어 제목' 칸과 CSV에 중국어가
+                # 조용히 섞여 번역된 것처럼 보입니다. 비워 두고 실패를 드러냅니다.
+                "title_ko": title_ko,
                 "original_text": original_text,
                 "translated_text": translated_text,
                 "content_scope": content_scope,
